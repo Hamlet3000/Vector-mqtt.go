@@ -38,9 +38,10 @@ func main() {
     aktTime := t.Format("2006-01-02T15:04:05.000-0700")
     voltage := batteryState.BatteryVolts
     docked := batteryState.IsOnChargerPlatform
+    battery := voltageToPercent(voltage)
 
     // get values into JSON format
-    message := fmt.Sprintf("{'robots': [{'name': '%s', 'voltage': %f, 'docked': %t, 'time': '%s'}]}", name, voltage, docked, aktTime)
+    message := fmt.Sprintf("{'robots': [{'name': '%s', 'voltage': %f, 'battery': %d, 'docked': %t, 'time': '%s'}]}", name, voltage, battery, docked, aktTime)
 
     // send values to publish
     publishMqtt(client, name, message)
@@ -55,6 +56,21 @@ func getName4Serial(serial string) string {
 
   name := "Vector-"+serial
   return name
+}
+
+// get batterystate in percent from voltage
+func voltageToPercent(value float64) int {
+    maxValue := 4.37
+    minValue := 3.56
+
+    if value >= maxValue {
+        return 100
+    } else if value <= minValue {
+        return 0
+    } else {
+        percent := ((value - minValue) / (maxValue - minValue)) * 100
+        return int(percent + 0.5) // Rundung zur nächsten ganzen Zahl
+    }
 }
 
 // configure MQTT-Client
