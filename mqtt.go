@@ -1,123 +1,121 @@
 package main
 
 import (
-    "context"
-    "encoding/json"
-    "flag"
-    "fmt"
-    "log"
-    "time"
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"time"
 
-    "github.com/fforchino/vector-go-sdk/pkg/vector"
-    "github.com/fforchino/vector-go-sdk/pkg/vectorpb"
-    "github.com/eclipse/paho.mqtt.golang"
+	"github.com/fforchino/vector-go-sdk/pkg/vector"
+	"github.com/fforchino/vector-go-sdk/pkg/vectorpb"
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 type RobotData struct {
-    Name    string  `json:"name"`
-    Voltage float64 `json:"voltage"`
-    Docked  bool    `json:"docked"`
-    Time    string  `json:"time"`
+	Name    string  `json:"name"`
+	Voltage float64 `json:"voltage"`
+	Docked  bool    `json:"docked"`
+	Time    string  `json:"time"`
 }
 
 type Payload struct {
-    Robots []RobotData `json:"robots"`
+	Robots []RobotData `json:"robots"`
 }
 
 func main() {
-    var serial = flag.String("serial", "", "Vector's Serial Number")
-    flag.Parse()
+	flag.Parse()
+	serials := flag.Args()
+	if len(serials) == 0 {
+		log.Fatal("Bitte mindestens eine Seriennummer angeben")
+	}
 
-    // configure mqtt clients
-    client := configMqtt("tcp://192.168.0.7:1883", "", "")
+	// MQTT-Client konfigurieren
+	client := configMqtt("tcp://homeassistant:1883", "TODO_USERNAME", "TODO_PASSWORD")
 
-    // connect to robot
-    robot, err := vector.NewEP(*serial)
-    if err != nil {
-        log.Fatal(err)
-    }
+	// Für jede Seriennummer eine eigene Goroutine starten
+	for _, serial := range serials {
+		go monitorRobot(serial, client)
+	}
 
-    for {
-        batteryState, err := robot.Conn.BatteryState(
-            context.Background(),
-            &vectorpb.BatteryStateRequest{},
-        )
-        if err != nil {
-            log.Fatal(err)
-        }
-
-        name := getName4Serial(*serial)
-        t := time.Now()
-        aktTime := t.Format("2006-01-02T15:04:05.000-0700")
-        voltage := batteryState.BatteryVolts
-        docked := batteryState.IsOnChargerPlatform
-
-        // Prepare robot data
-        robotData := RobotData{
-            Name:    name,
-            Voltage: float64(voltage),
-            Docked:  docked,
-            Time:    aktTime,
-        }
-
-        // Prepare payload
-        payload := Payload{
-            Robots: []RobotData{robotData},
-        }
-
-        // Publish data to MQTT brokers
-        publishMqtt(client, name, payload)
-
-
-        // Delay
-        time.Sleep(10 * time.Second)
-    }
+	// Hauptprozess blockieren, damit Goroutinen weiterlaufen
+	select {}
 }
 
-// get name for serial number
+// Überwacht einen Roboter und veröffentlicht regelmäßig MQTT-Daten
+func monitorRobot(serial string, client mqtt.Client) {
+	robot, err := vector.NewEP(serial)
+	if err != nil {
+		log.Printf("Fehler beim Verbinden mit Roboter %s: %v", serial, err)
+		return
+	}
+
+	for {
+		batteryState, err := robot.Conn.BatteryState(
+			context.Background(),
+			&vectorpb.BatteryStateRequest{},
+		)
+		if err != nil {
+			log.Printf("Fehler beim Abfragen des Akkustands von %s: %v", serial, err)
+			continue
+		}
+
+		name := getName4Serial(serial)
+		t := time.Now()
+		aktTime := t.Format("2006-01-02T15:04:05.000-0700")
+		voltage := batteryState.BatteryVolts
+		docked := batteryState.IsOnChargerPlatform
+
+		robotData := RobotData{
+			Name:    name,
+			Voltage: float64(voltage),
+			Docked:  docked,
+			Time:    aktTime,
+		}
+
+		publishMqtt(client, name, robotData)
+
+		time.Sleep(10 * time.Second)
+	}
+}
+
+// Gibt den Gerätenamen anhand der Seriennummer zurück
 func getName4Serial(serial string) string {
-    switch serial {
-    case "0dd1d1d6":
-        return "Vector-D1H8"
-    case "004043e9":
-        return "Vector-F2U7"
-    default:
-        return "Vector-" + serial
-    }
+	switch serial {
+	case "0dd1d1d6":
+		return "Vector-G5D7"
+	case "004043e9":
+		return "Vector-F2U7"
+	default:
+		return "Vector-" + serial
+	}
 }
 
-// configure MQTT-Client
+// Konfiguriert den MQTT-Client
 func configMqtt(brokerAddress, username, password string) mqtt.Client {
-    // config MQTT-Client
-    opts := mqtt.NewClientOptions().AddBroker(brokerAddress)
-    opts.SetClientID("Vector")
+	opts := mqtt.NewClientOptions().AddBroker(brokerAddress)
+	opts.SetClientID("Vector")
+	opts.SetUsername(username)
+	opts.SetPassword(password)
 
-    // Set username and password
-    opts.SetUsername(username)
-    opts.SetPassword(password)
-
-    // connect to MQTT-Broker
-    client := mqtt.NewClient(opts)
-    if token := client.Connect(); token.Wait() && token.Error() != nil {
-        log.Fatalf("Error when establishing connection to MQTT-Broker: %v", token.Error())
-    }
-    return client
+	client := mqtt.NewClient(opts)
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		log.Fatalf("Fehler beim Aufbau der MQTT-Verbindung: %v", token.Error())
+	}
+	return client
 }
 
-// Publish values to MQTT-Broker
-func publishMqtt(client mqtt.Client, topic string, data interface{}) {
-    jsonData, err := json.Marshal(data)
-    if err != nil {
-        log.Printf("Error while coding JSON Data: %v", err)
-        return
-    }
+// Veröffentlicht Roboter-Daten auf MQTT
+func publishMqtt(client mqtt.Client, name string, data RobotData) {
+	base := name + "/"
 
-    // Print JSON payload to console
-    fmt.Println(topic, string(jsonData))
+	fmt.Println("MQTT senden für:", name)
+	fmt.Println(base+"voltage =", data.Voltage)
+	fmt.Println(base+"docked  =", data.Docked)
+	fmt.Println(base+"time    =", data.Time)
 
-    // publish
-    if token := client.Publish(topic, 0, false, jsonData); token.Wait() && token.Error() != nil {
-        log.Printf("Error while publishing Data: %v", token.Error())
-    }
+	client.Publish(base+"voltage", 0, true, fmt.Sprintf("%.2f", data.Voltage)).Wait()
+	client.Publish(base+"docked", 0, true, fmt.Sprintf("%v", data.Docked)).Wait()
+	client.Publish(base+"time", 0, true, data.Time).Wait()
 }
 
